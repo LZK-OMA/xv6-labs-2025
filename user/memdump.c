@@ -61,5 +61,40 @@ void
 memdump(char *fmt, char *data)
 {
   // Your code here.
-
+  for(; *fmt; ++fmt){
+    if(*fmt == 'i'){
+        // 打印 4 字节 32 位整数
+        int val;
+        memcpy(&val, data, 4);
+        printf("%d\n", val);
+        data = data + 4;
+    } else if(*fmt == 'p'){
+        // 打印 8 字节 64 位十六进制指针
+        uint64 val;
+        memcpy(&val, data, 8);
+        printf("%lx\n", val);
+        data = data + 8;
+    } else if(*fmt == 'h'){
+        // 打印 2 字节 16 位整数
+        short val;
+        memcpy(&val, data, 2);
+        printf("%d\n", val);
+        data = data + 2;
+    } else if(*fmt == 'c'){
+        // 打印 1 字节字符
+        printf("%c\n", *data);
+        data = data + 1;
+    } else if(*fmt == 's'){
+        // 提取 8 字节指针并打印其指向的字符串
+        char *dst;
+        memcpy(&dst, data, 8);
+        printf("%s\n", dst);
+        data = data + 8;
+    } else if(*fmt == 'S'){
+        // 打印当前数据位置开始的整个字符串
+        printf("%s\n", data);
+        // 'S' 之后通常认为处理结束
+        break;
+    }
+}
 }
