@@ -143,8 +143,42 @@ walkaddr(pagetable_t pagetable, uint64 va)
 
 #if defined(LAB_PGTBL) || defined(SOL_MMAP) || defined(SOL_COW)
 void
+vmprint_walk(pagetable_t pagetable, int level, uint64 base_va)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    
+    // 仅处理有效 (PTE_V) 的条目
+    if(pte & PTE_V){
+      // 计算当前条目对应的虚拟地址 (VA)
+      // 根据层级位移：Level 2 位移 30位, Level 1 位移 21位, Level 0 位移 12位
+      uint64 va = base_va | ((uint64)i << (12 + 9 * level));
+
+      // 根据深度打印前缀 " .."
+      // 根页表(Level 2) 打印 1 个, Level 1 打印 2 个, Level 0 打印 3 个
+      for(int j = 0; j < (3 - level); j++){
+        printf(" ..");
+      }
+
+      // 打印 VA, PTE 原值, 以及从 PTE 中提取的物理地址 (PA)
+      printf("%p: pte %p pa %p\n", (void*)va, (void*)pte, (void*)PTE2PA(pte));
+
+      // 如果当前 PTE 不是叶子节点（即没有 R/W/X 权限位），则说明它指向下一级页表
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        pagetable_t child = (pagetable_t)PTE2PA(pte);
+        vmprint_walk(child, level - 1, va);
+      }
+    }
+  }
+}
+void
 vmprint(pagetable_t pagetable) {
   // your code here
+  // 打印页表根地址
+  printf("page table %p\n", pagetable);
+  
+  // 从最高级页表 (Level 2) 开始递归，初始 VA 为 0
+  vmprint_walk(pagetable, 2, 0);
 }
 #endif
 
