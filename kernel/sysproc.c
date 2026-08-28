@@ -105,3 +105,16 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_interpose(void)
+{
+  int mask;
+  char path[128];
+  argint(0, &mask);
+  if(argstr(1, path, 128) < 0)
+    return -1;
+  
+  myproc()->mask = mask; // 将 mask 存入进程结构体的新字段
+  return 0;
+}
