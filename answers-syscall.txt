@@ -1,0 +1,10 @@
+cat: cannot open README
+
+xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
+Version 6 (v6).  xv6 loosely follows the structure and style of v6,
+xv6 is inspired by John Lions's Commentary on UNIX 6th Edition (Peer
+(kaashoek,rtm@mit.edu).  The main purpose of xv6 is as a teaching
+
+grep: cannot open x
+
+xyzzy
