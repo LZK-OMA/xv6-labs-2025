@@ -289,6 +289,8 @@ kfork(void)
 
   np->mask = p->mask;
 
+  strncpy(np->permit_path, p->permit_path, MAXPATH);
+
   pid = np->pid;
 
   release(&np->lock);

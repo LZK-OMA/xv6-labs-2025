@@ -110,11 +110,15 @@ uint64
 sys_interpose(void)
 {
   int mask;
-  char path[128];
+  char path[MAXPATH];
+  struct proc *p = myproc();
+  
   argint(0, &mask);
-  if(argstr(1, path, 128) < 0)
+  
+  if(argstr(1, path, MAXPATH) < 0)
     return -1;
   
-  myproc()->mask = mask; // 将 mask 存入进程结构体的新字段
+  p->mask = mask;
+  strncpy(p->permit_path, path, MAXPATH);
   return 0;
 }

@@ -138,7 +138,7 @@ syscall(void)
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-     if(p->mask & (1 << num)){
+     if((p->mask & (1 << num))&& num != SYS_open && num != SYS_exec){
       p->trapframe->a0 = -1; // 拒绝执行
       return;
     }
