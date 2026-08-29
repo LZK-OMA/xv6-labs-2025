@@ -104,8 +104,27 @@ e1000_transmit(char *buf, int len)
   // return -1 on failure (e.g., there is no descriptor available)
   // so that the caller knows to free buf.
   //
-
+  acquire(&e1000_lock);   // 加锁，保护发送队列
+  uint32 idx = regs[E1000_TDT] % TX_RING_SIZE;   // 读取 TDT 寄存器，获取下一个可用的描述符索引
+  // 检查 DD (Descriptor Done) 位，判断该槽位是否已被硬件处理完毕
+  // 如果 DD 位没置位，说明环形缓冲区已满，无法发送
+  if((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+  if(tx_ring[idx].addr != 0)
+    kfree((char*)tx_ring[idx].addr);
   
+  // 将待发送的数据包信息填入描述符
+  tx_ring[idx].addr = (uint64)buf;
+  tx_ring[idx].length = len;
+  // 设置命令位
+  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_ring[idx].status = 0;
+
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+  release(&e1000_lock);   // 更新 TDT 寄存器，指向下一个索引
+
   return 0;
 }
 
@@ -118,6 +137,21 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver a buf for each packet (using net_rx()).
   //
+  while(1){
+    uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+    if((rx_ring[idx].status & E1000_RXD_STAT_DD) == 0)
+      break;
+    net_rx((char*)rx_ring[idx].addr, rx_ring[idx].length);
+    char *new_buf = kalloc();
+    if(!new_buf)
+      panic("e1000: alloc new recv buf failed");
+
+    rx_ring[idx].addr = (uint64)new_buf;
+    rx_ring[idx].status = 0;
+
+    regs[E1000_RDT] = idx;
+  }
 
 }
 
