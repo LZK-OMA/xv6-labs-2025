@@ -503,3 +503,127 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+get_free_mmap_vm(size_t len)
+{
+  struct proc *p = myproc();
+  for(int i = 1; i < NVMA; i++){
+    if(p->vma[i].inuse == 1){
+      if(p->vma[i - 1].addr - PGROUNDUP(p->vma[i].addr + p->vma[i].len) >= len)
+	return PGROUNDUP(p->vma[i].addr + p->vma[i].len);
+    } else
+      break;
+  }
+  return PGROUNDDOWN(p->mmap_top - len);
+}
+
+void
+update_mmap_top(void)
+{
+  struct proc *p = myproc();
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].inuse == 1)
+      p->mmap_top = p->vma[i].addr;
+  }
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  size_t len;
+  int prot, flags, fd;
+  long offset;
+  struct proc *p = myproc();
+  struct file *file;
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argfd(4, &fd, &file);
+  argaddr(5, (uint64 *)&offset);
+
+  if(((prot & PROT_READ) && !file->readable) ||
+     ((prot & PROT_WRITE) && (flags & MAP_SHARED) && !file->writable))
+    return -1;
+
+  if(addr == 0)
+    addr = get_free_mmap_vm(len);
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].inuse == 1 && p->vma[i].addr > addr)
+      continue;
+
+    for(int j = NVMA - 1; j > i; j--)
+      p->vma[j] = p->vma[j - 1];
+
+    p->vma[i].addr = addr;
+    p->vma[i].len = len;
+    p->vma[i].prot = prot;
+    p->vma[i].flags = flags;
+    p->vma[i].file = file;
+    p->vma[i].offset = offset;
+    p->vma[i].inuse = 1;
+
+    break;
+  }
+
+  update_mmap_top();
+  filedup(file);
+
+  return addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  size_t len;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].inuse == 1 && p->vma[i].addr <= addr && addr + len <= p->vma[i].addr + p->vma[i].len){
+      for(uint64 j = addr; j < addr + len; j += PGSIZE){
+        uint64 pa = walkaddr(p->pagetable, j);
+	if(pa != 0){
+	  if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE)){
+	    struct inode *ip = p->vma[i].file->ip;
+	    begin_op();
+	    ilock(ip);
+	    int n = PGSIZE;
+	    if(p->vma[i].offset + j - p->vma[i].addr + n > p->vma[i].file->ip->size)
+	      n = p->vma[i].file->ip->size - (p->vma[i].offset + j - p->vma[i].addr);
+
+	    writei(ip, 0, pa, p->vma[i].offset + j - p->vma[i].addr, n);
+	    iunlock(ip);
+	    end_op();
+	  }
+	  uvmunmap(p->pagetable, j, 1, 1);
+	}
+      }
+
+      if(p->vma[i].addr == addr && p->vma[i].len == len){
+        fileclose(p->vma[i].file);
+	p->vma[i].inuse = 0;
+	for(int j = i; j < NVMA - 1; j++)
+          p->vma[j] = p->vma[j + 1];
+      } else if(p->vma[i].addr == addr){
+        p->vma[i].addr += len;
+	p->vma[i].len -= len;
+	p->vma[i].offset += len;
+      } else if(p->vma[i].addr + p->vma[i].len == addr + len){
+        p->vma[i].len -= len;
+      } else{
+        panic("munmap: hole in vma not supported");
+      }
+      break;
+    }
+  }
+  update_mmap_top();
+  return 0;
+}

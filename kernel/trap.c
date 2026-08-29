@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -72,13 +76,55 @@ usertrap(void)
             vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
     // page fault on lazily-allocated page
   } else {
+    if(r_scause() == 13 || r_scause() == 15){
+      for(int i = 0; i < NVMA; i++){
+        uint64 va = r_stval();
+	      struct vma v = p->vma[i];
+        if(v.inuse && v.addr <= va && va < v.addr + v.len){
+          void *pa = kalloc();
+          memset(pa, 0, PGSIZE);
+          if(pa == 0){
+            printf("usertrap(): kalloc\n");
+            goto bad;
+          }
+
+          struct inode *ip = v.file->ip;
+          begin_op();
+          ilock(ip);
+          readi(ip, 0, (uint64)pa, v.offset + PGROUNDDOWN(va - v.addr), PGSIZE);
+          iunlock(ip);
+          end_op();
+
+          int perm = PTE_U;
+          if(v.prot & PROT_READ)
+            perm |= PTE_R;
+          if(v.prot & PROT_WRITE)
+            perm |= PTE_W;
+          if(v.prot & PROT_EXEC)
+            perm |= PTE_X;
+
+          if((r_scause() == 13 && !(perm & PTE_R)) || (r_scause() == 15 && !(perm & PTE_W))){
+            kfree(pa);
+            goto bad;
+          }
+
+          if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)pa, perm) != 0){
+            kfree(pa);
+            printf("usertrap(): mappages\n");
+            goto bad;
+          }
+	        goto good;
+	      }
+      }
+    }
+  bad:
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     setkilled(p);
   }
-
-  if(killed(p))
-    kexit(-1);
+  good:
+    if(killed(p))
+      kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
