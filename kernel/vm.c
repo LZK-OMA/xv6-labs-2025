@@ -117,6 +117,32 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   return &pagetable[PX(0, va)];
 }
 
+#ifdef LAB_PGTBL
+pte_t *
+superwalk(pagetable_t pagetable, uint64 va, int alloc, int *l)
+{
+  if(va >= MAXVA)
+    panic("superwalk");
+
+  for(int level = 2; level > *l; --level){
+    pte_t *pte = &pagetable[PX(level, va)]; // get current layer's pte address
+    if(*pte & PTE_V){
+      pagetable = (pagetable_t)PTE2PA(*pte);
+      if(PTE_LEAF(*pte)){
+        *l = level;
+	return pte;
+      }
+    }else{
+      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+	return 0;
+      memset(pagetable, 0, PGSIZE);
+      *pte = PA2PTE(pagetable) | PTE_V;
+    }
+  }
+  return  &pagetable[PX(*l, va)];
+}
+#endif
+
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -140,44 +166,39 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
-
-#if defined(LAB_PGTBL) || defined(SOL_MMAP) || defined(SOL_COW)
-void
-vmprint_walk(pagetable_t pagetable, int level, uint64 base_va)
+static void
+vmprint_walk(pagetable_t pagetable, int level, uint64 va)
 {
-  for(int i = 0; i < 512; i++){
+  for(int i = 0; i < 512; ++i){
     pte_t pte = pagetable[i];
-    
-    // 仅处理有效 (PTE_V) 的条目
-    if(pte & PTE_V){
-      // 计算当前条目对应的虚拟地址 (VA)
-      // 根据层级位移：Level 2 位移 30位, Level 1 位移 21位, Level 0 位移 12位
-      uint64 va = base_va | ((uint64)i << (12 + 9 * level));
+    // available pte and not leaf node with V equals 1
+    if((pte & PTE_V) == 0)
+      continue;
+    // calculate physical address
+    uint64 newva = va | ((uint64)i << (12 + 9 * level));
 
-      // 根据深度打印前缀 " .."
-      // 根页表(Level 2) 打印 1 个, Level 1 打印 2 个, Level 0 打印 3 个
-      for(int j = 0; j < (3 - level); j++){
-        printf(" ..");
-      }
+    // print layer levels, depth = 2 - level
+    for(int d = 0; d <= 2 - level; ++d)
+      printf(" ..");
 
-      // 打印 VA, PTE 原值, 以及从 PTE 中提取的物理地址 (PA)
-      printf("%p: pte %p pa %p\n", (void*)va, (void*)pte, (void*)PTE2PA(pte));
+    printf("%p: pte %p pa %p\n",
+	   (void*)newva,
+	   (void*)pte,
+	   (void*)PTE2PA(pte));
 
-      // 如果当前 PTE 不是叶子节点（即没有 R/W/X 权限位），则说明它指向下一级页表
-      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
-        pagetable_t child = (pagetable_t)PTE2PA(pte);
-        vmprint_walk(child, level - 1, va);
-      }
+    // continue recursion if not leaf node
+    if((pte & (PTE_R | PTE_W | PTE_X)) == 0){
+      pagetable_t child = (pagetable_t)PTE2PA(pte);
+      vmprint_walk(child, level - 1, newva);
     }
   }
 }
+
+#if defined(LAB_PGTBL) || defined(SOL_MMAP) || defined(SOL_COW)
 void
 vmprint(pagetable_t pagetable) {
   // your code here
-  // 打印页表根地址
   printf("page table %p\n", pagetable);
-  
-  // 从最高级页表 (Level 2) 开始递归，初始 VA 为 0
   vmprint_walk(pagetable, 2, 0);
 }
 #endif
@@ -217,15 +238,43 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   a = va;
   last = va + size - PGSIZE;
   for(;;){
+#ifdef LAB_PGTBL
+    int use_superpage = 0;
+    if((a % SUPERPGSIZE) == 0 && (a + SUPERPGSIZE <= last + PGSIZE) && (perm & PTE_U))
+      use_superpage = 1;
+    if(use_superpage){
+      int l = 1;
+      if((pte = superwalk(pagetable, a, 1, &l)) == 0)
+	return -1;
+    }else{
+      if((pte = walk(pagetable, a, 1)) == 0)
+	return -1;
+    }
+#else
     if((pte = walk(pagetable, a, 1)) == 0)
-      return -1;
+    return -1;
+#endif
     if(*pte & PTE_V)
       panic("mappages: remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
+#ifdef LAB_PGTBL
+    if(use_superpage){
+      if(a + SUPERPGSIZE == last + PGSIZE)
+	break;
+      a += SUPERPGSIZE;
+      pa += SUPERPGSIZE;
+    }else{
+      if(a == last)
+        break;
+      a += PGSIZE;
+      pa += PGSIZE;
+    }
+#else
     if(a == last)
       break;
     a += PGSIZE;
     pa += PGSIZE;
+#endif
   }
   return 0;
 }
@@ -256,19 +305,51 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   if((va % PGSIZE) != 0)
     panic("uvmunmap: not aligned");
 
-  for(a = va; a < va + npages*PGSIZE; a += sz){
-    if((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
-      continue;
-    if((*pte & PTE_V) == 0)  // has physical page been allocated?
-      continue;
+  for(a = va; a < va + npages * PGSIZE; a += sz){
     sz = PGSIZE;
+#ifdef LAB_PGTBL
+    int l = 0;
+    int flag = 0;
+    if((pte = superwalk(pagetable, a, 0, &l)) == 0)
+      panic("uvmunmap: walk");
+#else
+    if((pte = walk(pagetable, a, 0)) == 0)
+      panic("uvmunmap: walk");
+#endif
+    if((*pte & PTE_V) == 0){
+      printf("va=%ld pte=%ld\n", a, *pte);
+      panic("uvmunmap: walk");
+    }
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
       uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+#ifdef LAB_PGTBL
+      if(l == 1){
+        int perm = *pte & 0xFFF;
+	*pte = 0;
+	flag = 1;
+	sz = SUPERPGSIZE;
+	if(a % SUPERPGSIZE != 0){
+	  for(uint64 i = SUPERPGROUNDDOWN(a); i < va; i += PGSIZE){
+	    char *mem = kalloc();
+	    if(mem == 0)
+              panic("uvmunmap: kalloc");
+	    mappages(pagetable, i, PGSIZE,(uint64)mem, perm);
+	    memmove(mem, (char*)pa + i - SUPERPGROUNDDOWN(a), PGSIZE);
+	  }
+	  a = SUPERPGROUNDUP(a);
+	  sz = 0;
+	}
+	superfree((void*)pa);
+      }else
+#endif
+	 kfree((void*)pa);
     }
-    *pte = 0;
+#ifdef LAB_PGTBL
+    if(flag == 0)
+#endif
+      *pte = 0;
   }
 }
 
@@ -288,16 +369,27 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
   oldsz = PGROUNDUP(oldsz);
   for(a = oldsz; a < newsz; a += sz){
     sz = PGSIZE;
-    mem = kalloc();
+#ifdef LAB_PGTBL
+    if(newsz - a >= SUPERPGSIZE && a % SUPERPGSIZE == 0){
+      sz = SUPERPGSIZE;
+      mem = superalloc();
+    }else
+#endif
+      mem = kalloc();
     if(mem == 0){
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
 #ifndef LAB_SYSCALL
     memset(mem, 0, sz);
- #endif
+#endif
     if(mappages(pagetable, a, sz, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
-      kfree(mem);
+#ifdef LAB_PGTBL
+      if(sz == SUPERPGSIZE)
+	superfree(mem);
+      else
+#endif
+        kfree(mem);
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
@@ -367,17 +459,34 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint64 pa, i;
   uint flags;
   char *mem;
-  int szinc = PGSIZE;
+  int szinc;
 
   for(i = 0; i < sz; i += szinc){
-    if((pte = walk(old, i, 0)) == 0)
-      continue;
-    if((*pte & PTE_V) == 0) {
-      continue;
-    }
     szinc = PGSIZE;
+#ifdef LAB_PGTBL
+    int l = 0;
+    if((pte = superwalk(old, i, 0, &l)) == 0)
+      panic("uvmcopy: pte should exist");
+#else
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+#endif
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
+#ifdef LAB_PGTBL
+    if(l == 1){
+      szinc = SUPERPGSIZE;
+      if((mem = superalloc()) == 0)
+	goto err;
+      memmove(mem, (char*)pa, SUPERPGSIZE);
+      if(mappages(new, i, SUPERPGSIZE, (uint64)mem, flags) != 0){
+        superfree(mem);
+	goto err;
+      }
+    }else{
+#endif
     if((mem = kalloc()) == 0)
       goto err;
     memmove(mem, (char*)pa, PGSIZE);
@@ -385,6 +494,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       kfree(mem);
       goto err;
     }
+#ifdef LAB_PGTBL
+    }
+#endif
   }
   return 0;
 

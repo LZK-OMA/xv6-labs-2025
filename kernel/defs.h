@@ -66,6 +66,8 @@ void            ireclaim(int);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+void*           superalloc(void);
+void		    superfree(void *pa);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -190,6 +192,7 @@ void            vmprint(pagetable_t);
 #endif
 #ifdef LAB_PGTBL
 pte_t*          pgpte(pagetable_t, uint64);
+pte_t*		superwalk(pagetable_t, uint64, int, int *);
 #endif
 
 // plic.c
