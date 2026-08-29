@@ -81,8 +81,30 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    struct proc *p = myproc();
+    // 如果闹钟已开启（不等于 -1）
+    if(p->alarmhandler != -1){
+      p->alarmtickscount++;
+
+      // 到达指定的 ticks
+      if(p->alarmtickscount >= p->alarmticks && p->alarmticks > 0){
+        p->alarmtickscount = 0; // 重置计数
+
+        // 如果没有正在执行 handler，则启动 handler
+        if(!p->inhandler){
+          p->inhandler = 1; // 标记进入 handler，防止在 handler 执行中再次触发
+          
+          // 1. 保存当前 trapframe 到备用的 alarm_tf 中
+          memmove(&p->alarm_tf, p->trapframe, sizeof(struct trapframe));
+          
+          // 2. 修改 epc，使得返回用户态时跳转到 handler 函数
+          p->trapframe->epc = (uint64)p->alarmhandler;
+        }
+      }
+    }
     yield();
+  }
 
   prepare_return();
 

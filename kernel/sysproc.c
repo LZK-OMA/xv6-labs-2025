@@ -106,3 +106,44 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler;
+
+  argint(0, &ticks);
+  argaddr(1, &handler);
+
+  struct proc *p = myproc();
+  p->alarmticks = ticks;
+  p->alarmtickscount = 0;
+
+  // 如果参数是 (0, 0)，则关闭闹钟功能
+  if(ticks == 0 && handler == 0){
+    p->alarmhandler = -1;
+  } else {
+    p->alarmhandler = handler;
+  }
+
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+
+  // 1. 从备份中恢复原来的所有寄存器状态
+  memmove(p->trapframe, &p->alarm_tf, sizeof(struct trapframe));
+
+  // 2. 解除正在执行处理函数的标记
+  p->inhandler = 0;
+  
+  // 3. 重置计数器
+  p->alarmtickscount = 0;
+
+  // 必须返回被中断处的 a0，否则原程序获取的返回值会出错
+  return p->trapframe->a0;
+}
