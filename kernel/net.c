@@ -19,10 +19,37 @@ static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
 static struct spinlock netlock;
 
+#define MAX_PACKETS 16
+#define MAX_UDP_PORT 65535
+
+struct udp_packet{
+  struct udp_packet *next;
+  uint32 src_ip;
+  uint16 src_port;
+  int len;
+  char data[0];
+};
+
+struct udp_bound{
+  struct spinlock lock;
+  struct udp_packet *head;
+  struct udp_packet *tail;
+  int count;
+  int inuse;
+};
+static struct udp_bound ports[MAX_UDP_PORT + 1];
+
 void
 netinit(void)
 {
   initlock(&netlock, "netlock");
+
+  for(int i = 0; i <= MAX_UDP_PORT; i++){
+    initlock(&ports[i].lock, "port_queue");
+    ports[i].head = ports[i].tail = 0;
+    ports[i].count = 0;
+    ports[i].inuse = 0;
+  }
 }
 
 
@@ -38,7 +65,21 @@ sys_bind(void)
   // Your code here.
   //
 
-  return -1;
+  int port;
+  argint(0, &port);
+    
+
+  if(port < 0 || port > MAX_UDP_PORT)
+    return -1;
+  acquire(&ports[port].lock);
+  if(ports[port].inuse){
+    release(&ports[port].lock);
+    return -1;
+  }
+  ports[port].inuse = 1;
+  release(&ports[port].lock);
+
+  return 0;
 }
 
 //
@@ -77,7 +118,57 @@ sys_recv(void)
   //
   // Your code here.
   //
-  return -1;
+  int dport, maxlen;
+  uint64 src_addr, sport_addr, buf_addr;
+
+  argint(0, &dport);
+  argaddr(1, &src_addr);
+  argaddr(2, &sport_addr);
+  argaddr(3, &buf_addr);
+  argint(4, &maxlen);
+
+  if(dport < 0 || dport > MAX_UDP_PORT)
+    return -1;
+  struct udp_bound *q = &ports[dport];
+  acquire(&q->lock);
+  
+  if(!q->inuse){
+    release(&q->lock);
+    return -1;
+  }
+
+  while(q->count == 0){
+    sleep(q, &q->lock);
+  }
+
+  struct udp_packet *p = q->head;
+  q->head = p->next;
+  if(q->head == 0){
+    q->tail = 0;
+  }
+  q->count--;
+  release(&q->lock);
+  
+  uint32 src_ip = p->src_ip;
+  if(copyout(myproc()->pagetable, src_addr, (char *)&src_ip, sizeof(src_ip)) < 0){
+    kfree(p);
+    return -1;
+  }
+  
+  uint16 src_port = p->src_port;
+  if(copyout(myproc()->pagetable, sport_addr, (char *)&src_port, sizeof(src_port)) < 0){
+    kfree(p);
+    return -1;
+  }
+
+  int copy_len = p->len < maxlen ? p->len : maxlen;
+  if(copyout(myproc()->pagetable, buf_addr, p->data, copy_len) < 0){
+    kfree(p);
+    return -1;
+  }
+
+  kfree(p);
+  return copy_len;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -191,7 +282,74 @@ ip_rx(char *buf, int len)
   //
   // Your code here.
   //
-  
+  if(len < sizeof(struct eth) + sizeof(struct ip) + sizeof(struct udp)){
+    kfree(buf);
+    return;
+  }
+
+  struct eth *eth = (struct eth *)buf;
+  struct ip *ip = (struct ip *)(eth + 1);
+  int ip_header_len = (ip->ip_vhl & 0x0F) * 4;
+  if(ip_header_len < sizeof(struct ip) || (ip->ip_vhl >> 4) != 4){
+    kfree(buf);
+    return;
+  }
+
+  if(ip->ip_p != IPPROTO_UDP){
+    kfree(buf);
+    return;
+  }
+
+  struct udp *udp = (struct udp *)((char*)ip + ip_header_len);
+  uint16 dport = ntohs(udp->dport);
+  uint16 sport = ntohs(udp->sport);
+  uint16 udp_len = ntohs(udp->ulen);
+
+  if(udp_len < sizeof(struct udp) ||
+      (ip_header_len + udp_len) > (len - sizeof(struct eth))){
+    kfree(buf);
+    return;
+  }
+  int data_len = udp_len - sizeof(struct udp);
+  char *data = (char *)udp + sizeof(struct udp);
+
+  if(dport < 0 || dport > MAX_UDP_PORT || !ports[dport].inuse){
+    kfree(buf);
+    return;
+  }
+
+  struct udp_packet *p = kalloc();
+  if(!p){
+    kfree(buf);
+    return;
+  }
+
+  p->next = 0;
+  p->src_ip = ntohl(ip->ip_src);
+  p->src_port = sport;
+  p->len = data_len;
+  memmove(p->data, data, data_len);
+
+  struct udp_bound *q = &ports[dport];
+  acquire(&q->lock);
+
+  if(q->count >= MAX_PACKETS){
+    release(&q->lock);
+    kfree(p);
+    kfree(buf);
+    return;
+  }
+
+  if(q->tail){
+    q->tail->next = p;
+  } else{
+    q->head = p;
+  }
+  q->tail = p;
+  q->count++;
+  wakeup(q);
+  release(&q->lock);
+  kfree(buf);
 }
 
 //
