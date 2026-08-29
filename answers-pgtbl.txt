@@ -1,0 +1,10 @@
+运行 pgtbltest 时，print_pgtbl 利用实验提供的 pgpte 系统调用打印出 pgtbltest 进程前 10 页与后 10 页的页表项，形如：
+
+va 0 pte 0x21FCF45B pa 0x87F3D000 perm 0x5B
+va 1000 pte 0x21FCE85B pa 0x87F3A000 perm 0x5B
+...
+va 0xFFFFD000 pte 0x0 pa 0x0 perm 0x0
+va 0xFFFFE000 pte 0x21FD80C7 pa 0x87F60000 perm 0xC7
+va 0xFFFFF000 pte 0x20001C4B pa 0x80007000 perm 0x4B
+
+据此可以观察到：低地址部分（va 0、va 1000 等）是进程的代码段、数据段和堆等用户页，perm 0x5B 等包含 U/R/W 等权限位；高地址部分（0xFFFFD000 附近）是内核为用户进程映射的特殊页（如 va 0xFFFFF000 对应 TRAMPOLINE 跳板页，perm 0x4B 为特权页），而 va 0xFFFFD000 的 pte 0x0 表示未映射。同时也印证了 xv6 的虚拟页在物理内存中并不连续。
