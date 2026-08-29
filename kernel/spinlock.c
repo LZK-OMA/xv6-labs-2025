@@ -125,28 +125,62 @@ static void
 read_acquire_inner(struct rwspinlock *rwlk)
 {
   // Replace this with your implementation.
-  acquire(&rwlk->l);
+  //acquire(&rwlk->l);
+  while (1) {
+    acquire(&rwlk->lock);
+    // 有写者等待/持有锁，就释放锁并重试
+    if (rwlk->writers_waiting > 0 || rwlk->writing > 0) {
+      release(&rwlk->lock);
+      asm volatile("nop");
+      continue;
+    }
+    // 没有写者，获取读锁
+    rwlk->readers++;
+    release(&rwlk->lock);
+    return;
+  }
 }
 
 static void
 read_release_inner(struct rwspinlock *rwlk)
 {
   // Replace this with your implementation.
-  release(&rwlk->l);
+  //release(&rwlk->l);
+  acquire(&rwlk->lock);
+  rwlk->readers--;
+  release(&rwlk->lock);
 }
 
 static void
 write_acquire_inner(struct rwspinlock *rwlk)
 {
   // Replace this with your implementation.
-  acquire(&rwlk->l);
+  //acquire(&rwlk->l);
+
+  acquire(&rwlk->lock);
+  rwlk->writers_waiting++;
+
+  // 持续持有锁，直到获得写锁
+  while (rwlk->readers > 0 || rwlk->writing > 0) {
+    // 释放锁并重新获取,让其他 CPU 有机会运行
+    release(&rwlk->lock);
+    asm volatile("nop");
+    acquire(&rwlk->lock);
+  }
+
+  rwlk->writers_waiting--;
+  rwlk->writing = 1;
+  release(&rwlk->lock);
 }
 
 static void
 write_release_inner(struct rwspinlock *rwlk)
 {
   // Replace this with your implementation.
-  release(&rwlk->l);
+  //release(&rwlk->l);
+  acquire(&rwlk->lock);
+  rwlk->writing = 0;
+  release(&rwlk->lock);
 }
 
 void
@@ -181,7 +215,11 @@ void
 initrwlock(struct rwspinlock *rwlk)
 {
   // Replace this with your implementation.
-  initlock(&rwlk->l, "rwlk");
+  //initlock(&rwlk->l, "rwlk");
+  rwlk->readers = 0;
+  rwlk->writers_waiting = 0;
+  rwlk->writing = 0;
+  initlock(&rwlk->lock, "rwlock");
 }
 
 // Test rwspinlock implementation.
