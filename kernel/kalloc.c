@@ -10,6 +10,9 @@
 #include "defs.h"
 
 void freerange(void *pa_start, void *pa_end);
+void incref(uint64 pa);
+void decref(uint64 pa);
+
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
@@ -23,10 +26,18 @@ struct {
   struct run *freelist;
 } kmem;
 
+// 引用计数相关
+struct spinlock ref_lock;
+int refcount[(PHYSTOP - KERNBASE) / PGSIZE];  // 物理页引用计数数组
+
+// 获取物理页索引
+#define PA2IDX(pa) (((uint64)pa - KERNBASE) / PGSIZE)
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&ref_lock, "refcount"); 
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +46,17 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
-    kfree(p);
+  acquire(&ref_lock); 
+  for (; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    refcount[PA2IDX(p)] = 1;  // 初始化引用计数为1
+  }  
+
+  release(&ref_lock);
+  // 调用 kfree，此时 kfree 会获取锁并减少计数
+  p = (char*)PGROUNDUP((uint64)pa_start);
+  for (; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    kfree(p);  // kfree 内部会获取 ref_lock，减少计数，然后释放
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -51,8 +71,20 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  // 减少引用计数，为0释放
+  acquire(&ref_lock);
+  int idx = PA2IDX((uint64)pa);
+  if (refcount[idx] > 0) {
+    refcount[idx]--;
+  }
+  if (refcount[idx] > 0) {
+    release(&ref_lock);
+    return;  // 不释放
+  }
+  release(&ref_lock);
+
   // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
+  //memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
 
@@ -76,7 +108,31 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+  if (r) {
+    // 初始化引用计数为1
+    acquire(&ref_lock);
+    refcount[PA2IDX((uint64)r)] = 1;
+    release(&ref_lock);
+  }
+    //memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+void
+incref(uint64 pa)
+{
+  if ((uint64)pa < KERNBASE || (uint64)pa >= PHYSTOP)
+    panic("incref");
+  acquire(&ref_lock);
+  refcount[PA2IDX(pa)]++;
+  release(&ref_lock);
+}
+
+// 减少引用计数（其实就是调用kfree）
+void
+decref(uint64 pa)
+{
+  if ((uint64)pa < KERNBASE || (uint64)pa >= PHYSTOP)
+    panic("decref");
+  kfree((void*)pa);
 }

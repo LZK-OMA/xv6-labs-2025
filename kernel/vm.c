@@ -17,6 +17,10 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+void incref(uint64 pa);
+void decref(uint64 pa);
+int cow_handle(pagetable_t pagetable, uint64 va);
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -205,7 +209,8 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       continue;
     if(do_free){
       uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+      decref(pa);
+      //kfree((void*)pa);
     }
     *pte = 0;
   }
@@ -299,7 +304,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -308,13 +313,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       continue;   // physical page hasn't been allocated
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    // 如果页面是可写的，改为COW页面
+    if (flags & PTE_W) {
+      // 清除写标志，设置COW标志
+      flags = (flags & ~PTE_W) | PTE_COW;
+      // 修改父进程的PTE
+      *pte = PA2PTE(pa) | flags;
+    }
+
+    // 子进程直接映射到同一个物理页（不分配新页）
+    if (mappages(new, i, PGSIZE, pa, flags) != 0) {
       goto err;
     }
+
+    // 增加物理页的引用计数
+    incref(pa);
   }
   return 0;
 
@@ -343,29 +357,45 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-  pte_t *pte;
+  pte_t* pte;
 
-  while(len > 0){
+  while (len > 0) {
     va0 = PGROUNDDOWN(dstva);
-    if(va0 >= MAXVA)
+    if (va0 >= MAXVA)
       return -1;
-  
+
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0) {
-      if((pa0 = vmfault(pagetable, va0, 0)) == 0) {
+    if (pa0 == 0) {
+      if ((pa0 = vmfault(pagetable, va0, 0)) == 0) {
         return -1;
       }
     }
 
     pte = walk(pagetable, va0, 0);
-    // forbid copyout over read-only user text pages.
-    if((*pte & PTE_W) == 0)
+    if (pte == 0)
       return -1;
-      
+
+    // 如果页面不可写，检查是否是COW页
+    if ((*pte & PTE_W) == 0) {
+      // 如果是COW页，调用vmfault处理（传入 0 表示写操作）
+      if ((*pte & PTE_COW) && (pa0 = vmfault(pagetable, va0, 0)) != 0) {
+        pte = walk(pagetable, va0, 0);
+        if (pte == 0)
+          return -1;
+      }
+      else {
+        return -1;
+      }
+    }
+
+    // 再次检查是否可写
+    if ((*pte & PTE_W) == 0)
+      return -1;
+
     n = PGSIZE - (dstva - va0);
-    if(n > len)
+    if (n > len)
       n = len;
-    memmove((void *)(pa0 + (dstva - va0)), src, n);
+    memmove((void*)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
     src += n;
@@ -382,18 +412,15 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
 
-  while(len > 0){
+  while (len > 0) {
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0) {
-      if((pa0 = vmfault(pagetable, va0, 0)) == 0) {
-        return -1;
-      }
-    }
+    if (pa0 == 0)
+      return -1;
     n = PGSIZE - (srcva - va0);
-    if(n > len)
+    if (n > len)
       n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+    memmove(dst, (void*)(pa0 + (srcva - va0)), n);
 
     len -= n;
     dst += n;
@@ -412,22 +439,23 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   uint64 n, va0, pa0;
   int got_null = 0;
 
-  while(got_null == 0 && max > 0){
+  while (got_null == 0 && max > 0) {
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if (pa0 == 0)
       return -1;
     n = PGSIZE - (srcva - va0);
-    if(n > max)
+    if (n > max)
       n = max;
 
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
+    char* p = (char*)(pa0 + (srcva - va0));
+    while (n > 0) {
+      if (*p == '\0') {
         *dst = '\0';
         got_null = 1;
         break;
-      } else {
+      }
+      else {
         *dst = *p;
       }
       --n;
@@ -438,9 +466,10 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
     srcva = va0 + PGSIZE;
   }
-  if(got_null){
+  if (got_null) {
     return 0;
-  } else {
+  }
+  else {
     return -1;
   }
 }
@@ -455,12 +484,35 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   uint64 mem;
   struct proc *p = myproc();
 
+  // 如果没有进程上下文，不处理
+  if (p == 0)
+    return 0;
+
+  // 页对齐必须在最前面
+  va = PGROUNDDOWN(va);
+
+  // 检查地址是否在进程空间内
   if (va >= p->sz)
     return 0;
-  va = PGROUNDDOWN(va);
+
+  // !read 表示写操作 -> 检查 COW
+  if (!read) {
+    pte_t* pte = walk(pagetable, va, 0);
+    if (pte && (*pte & PTE_V) && (*pte & PTE_COW) && !(*pte & PTE_W)) {
+      // 这是COW页，处理它
+      if (cow_handle(pagetable, va) == 0) {
+        // 处理成功，返回新页的物理地址
+        return walkaddr(pagetable, va);
+      }
+      return 0;  // 处理失败
+    }
+  }
+
   if(ismapped(pagetable, va)) {
     return 0;
   }
+
+  // 分配新页
   mem = (uint64) kalloc();
   if(mem == 0)
     return 0;
@@ -470,6 +522,52 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
     return 0;
   }
   return mem;
+}
+
+int
+cow_handle(pagetable_t pagetable, uint64 va)
+{
+  pte_t* pte;
+  uint64 pa, newpa;
+  uint flags;
+
+  va = PGROUNDDOWN(va);
+
+  if ((pte = walk(pagetable, va, 0)) == 0)
+    return -1;
+  if ((*pte & PTE_V) == 0)
+    return -1;
+  if ((*pte & PTE_COW) == 0)
+    return -1;
+  if (*pte & PTE_W)  // 已经是可写的，不应该触发COW
+    return -1;
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+
+  // 分配新物理页
+  if ((newpa = (uint64)kalloc()) == 0)
+    return -1;
+
+  // 复制内容
+  memmove((void*)newpa, (void*)pa, PGSIZE);
+
+  // 清除COW，设置W
+  flags = (flags & ~PTE_COW) | PTE_W;
+
+  // 解除旧映射（不释放物理页，引用计数会处理）
+  uvmunmap(pagetable, va, 1, 0);
+
+  // 建立新映射
+  if (mappages(pagetable, va, PGSIZE, newpa, flags) != 0) {
+    kfree((void*)newpa);
+    return -1;
+  }
+
+  // 减少旧页的引用计数
+  decref(pa);
+
+  return 0;
 }
 
 int
